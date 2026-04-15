@@ -1,0 +1,128 @@
+---
+description: Quill API — how to programmatically create and modify Kognitos automations via the AI agent
+alwaysApply: true
+---
+
+# Quill Agent API
+
+Quill is the Kognitos AI agent that creates and updates automation code. Interact via the threads API.
+
+## Endpoints
+
+### 1. Create a thread for an automation
+```
+POST /organizations/{ORG_ID}/workspaces/{WS_ID}/agents/quill/threads
+```
+```json
+{ "automation": "organizations/{ORG_ID}/workspaces/{WS_ID}/automations/{AUTO_ID}" }
+```
+Extract thread ID from response `name` (last segment after `/threads/`).
+
+### 2. Send a message to Quill
+```
+POST /organizations/{ORG_ID}/workspaces/{WS_ID}/agents/quill/threads/{THREAD_ID}:sendMessage
+```
+```json
+{
+  "user_message": {
+    "user_message": {
+      "user_message_type": "user_query",
+      "content_list": { "items": [{ "text": "YOUR_INSTRUCTION_HERE" }] }
+    }
+  }
+}
+```
+**Required header**: `Accept: application/x-ndjson`
+
+### 3. Parse the NDJSON response
+
+Response is streamed NDJSON. Key message types:
+- `progress_notification` — thinking/heartbeat
+- `tool_call_request` — Quill calling internal tools
+- `agent_message` — Quill's text responses
+- `artifact` — execution references
+- `completion_response` — final answer (`state = STATE_COMPLETE`)
+
+Extract answer from `completion_response.content` or last `agent_message.content`.
+
+## What Quill Can Do
+- **Create automations** from plain English descriptions
+- **Update automation code** with targeted instructions
+- **Search procedures** across all connected integrations
+- **Execute test code** (spy code) to prototype logic
+- **Fix exceptions** in automation runs
+
+## Best Practices for Talking to Quill
+
+### DO:
+- **Be specific**: Include exact procedure signatures, field names, variable names
+- **One thing at a time**: Large changes are more reliable as 2-3 smaller messages
+- **Reference the current code**: Say "at line X" or "in the validation step" 
+- **Provide the fix**: Don't just describe the problem — give the solution code pattern
+- **Ask Quill to search first**: Before using a procedure, ask Quill to search for it and show the signature
+- **Verify after each change**: Run a test to catch errors before the next change
+
+### DON'T:
+- **Don't assume SPy supports Python features** — no `import`, no `try/except`, no `exit()`, no `with`, no list comprehensions
+- **Don't send huge messages** — Quill's NDJSON response can time out on very large code changes
+- **Don't guess procedure signatures** — always search first
+- **Don't rely on dict key order in SPy** — use `.select_columns([...])` to enforce column order in tables
+- **Don't use `read_input` for optional inputs** — SPy throws if the input isn't provided, there's no way to handle missing inputs gracefully
+
+## SPy Language Limitations (Critical)
+
+SPy (Subset-of-Python) is NOT Python. Key differences:
+- **No `import`** — no libraries, no openpyxl, no csv, no datetime
+- **No `try/except`** — errors crash the automation
+- **No `exit()` or `return`** — code runs top to bottom, use `if/else` to skip sections
+- **No list comprehensions** — use explicit `for` loops
+- **No `.get()` on dicts** — use `key in dict` check before accessing
+- **No string `.format()` or f-strings** — use `+` concatenation
+- **Dicts don't preserve insertion order** — use `table.select_columns([...])` for ordered output
+- **`float()` can crash** — sanitize strings first (replace dashes with dots, check for empty)
+- **Built-ins available**: `len()`, `str()`, `int()`, `float()`, `range()`, `enumerate()`, `today()`, `now()`, `strftime()`, `read_input()`, `set_output()`, `table_from_dict()`, `table_from_records()`
+
+## Common Patterns
+
+### Creating an automation from scratch
+1. `POST .../automations` with `{ "display_name": "My Automation" }` — creates empty automation
+2. Create Quill thread for that automation
+3. Send SOP description to Quill — it generates the code
+4. Test with `:invoke` using `AUTOMATION_STAGE_DRAFT`
+
+### Iterating on an automation
+1. Identify the error/issue from a test run
+2. Create a new Quill thread (threads are per-conversation, not persistent)
+3. Describe the specific fix needed — include error message, line number, expected behavior
+4. Quill reads current code, makes the edit, validates, saves
+5. Re-test
+
+### Discovering integration procedures
+```
+"Search for all available procedures in the [connection_name] connection (connection_id: [id]). 
+Show me the exact signature for [procedure_name]."
+```
+
+## Template Code (TypeScript helpers)
+
+```typescript
+// Create thread + send one-shot question
+async function askQuillOneShot(question: string, automationId: string): Promise<QuillResult> {
+  const threadId = await createQuillThread(automationId);
+  return askQuill(threadId, question);
+}
+
+// NDJSON parsing — bracket-depth scanner for robust JSON extraction
+function extractJsonObjects(raw: string): Record<string, any>[] {
+  const objects: Record<string, any>[] = [];
+  let depth = 0, start = -1;
+  for (let i = 0; i < raw.length; i++) {
+    if (raw[i] === "{") { if (depth === 0) start = i; depth++; }
+    else if (raw[i] === "}") { depth--; if (depth === 0 && start >= 0) {
+      try { objects.push(JSON.parse(raw.slice(start, i + 1))); } catch {}
+      start = -1;
+    }}
+  }
+  return objects;
+}
+```

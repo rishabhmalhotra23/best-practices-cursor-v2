@@ -1,0 +1,92 @@
+---
+description: Kognitos API reference — base URL, auth, endpoints, response shapes, and hard-won gotchas
+alwaysApply: true
+---
+
+# Kognitos API Reference
+
+These are verified facts about the Kognitos API. Do NOT guess or trial-and-error.
+
+## Base URL
+
+- `KOGNITOS_BASE_URL` **must** include `/api/v1`. Without it → 403.
+- Production: `https://app.{region}.kognitos.com/api/v1` (e.g., `https://app.us-1.kognitos.com/api/v1`)
+- Staging: `https://app.{region}.stg.kognitos.com/api/v1`
+- If user provides a bare URL like `https://app.us-1.kognitos.com/`, append `/api/v1` yourself.
+
+## Authentication
+
+- Header: `Authorization: Bearer <KOGNITOS_TOKEN>`
+- Tokens have the `kgn_pat_` prefix.
+
+## Response Format
+
+- **List endpoints** return an object keyed by resource type: `{ "automations": [...] }`, `{ "runs": [...] }` — NOT `{ "items": [...] }`.
+- **Resource identifiers** use a `name` field with full path: `organizations/{ORG}/workspaces/{WS}/automations/{ID}`. Extract ID: `.split("/").pop()`.
+- **Display names** are in `display_name`, not `name`. The `name` field is the resource path.
+
+## Key Endpoints
+
+### List automations
+```
+GET /organizations/{ORG_ID}/workspaces/{WS_ID}/automations?pageSize=50
+```
+
+### Get automation details
+```
+GET /organizations/{ORG_ID}/workspaces/{WS_ID}/automations/{AUTO_ID}
+```
+Returns: `display_name`, `english_code`, `code`, `connections`, `input_specs`
+
+### Invoke automation (async)
+```
+POST /organizations/{ORG_ID}/workspaces/{WS_ID}/automations/{AUTO_ID}:invoke
+```
+```json
+{
+  "inputs": { "field_name": { "text": "value" } },
+  "stage": "AUTOMATION_STAGE_PUBLISHED"
+}
+```
+- `stage`: Use `AUTOMATION_STAGE_PUBLISHED` for production, `AUTOMATION_STAGE_DRAFT` for testing.
+- Input values use typed wrappers: `{ "text": "..." }`, `{ "number": { "lo": N } }`, `{ "bool_value": true }`, `{ "file": { "remote": "file_resource_name" } }`.
+- Returns: `{ "run_id": "organizations/.../runs/{RUN_ID}" }`. Extract with `.split("/runs/").pop()`.
+
+### Poll run status
+```
+GET /organizations/{ORG_ID}/workspaces/{WS_ID}/automations/{AUTO_ID}/runs/{RUN_ID}
+```
+Poll every 1.5-3 seconds. Terminal states:
+- `state.completed` — outputs in `state.completed.outputs`
+- `state.failed` — error in `state.failed.error`
+- `state.awaiting_guidance` — exception, needs intervention
+
+### Upload file
+```
+POST /organizations/{ORG_ID}/files:upload
+```
+Multipart form-data. Returns `{ "metadata": { "name": "organizations/.../files/{FILE_ID}" } }`.
+
+### List workspace connections
+```
+GET /organizations/{ORG_ID}/workspaces/{WS_ID}/connections
+```
+
+## Output Value Types
+
+Numbers: `{ "number": { "lo": N, "mid": 0, "hi": 0, "flags": F } }` — value = `lo / 10^((flags >> 16) & 0xff)`
+Tables: `{ "table": { "inline": { "data": "<base64 Arrow IPC>" } } }` — decode with `apache-arrow` npm package
+Text: `{ "text": "string" }`
+Bool: `{ "bool_value": true/false }`
+Lists: `{ "list": { "items": [...] } }`
+Dicts: `{ "dictionary": { "entries": [{ "key": {...}, "value": {...} }] } }`
+Files: `{ "file": { "remote": "organizations/.../files/{ID}" } }`
+
+## Critical Gotchas
+
+1. **`/api/v1` is required** — `/api` alone returns 403.
+2. **List responses are NOT arrays** — they're objects with a named key (`automations`, `runs`, etc.).
+3. **`name` is NOT the display name** — it's the resource path. Use `display_name`.
+4. **Invoke is async** — you must poll for results, it doesn't return outputs immediately.
+5. **Arrow IPC decoding** — use `apache-arrow` npm package in TypeScript. Never use Python/pyarrow.
+6. **SPy code (server-side)** has NO `import`, NO `try/except`, NO `exit()`. Dicts don't preserve key order.

@@ -1,0 +1,66 @@
+---
+description: Step-by-step workflow for building a new Kognitos automation using Cursor + Quill
+alwaysApply: true
+---
+
+# Kognitos Automation Builder — Workflow
+
+Follow these phases in order when building a new automation.
+
+## Phase 1: Environment Setup
+1. Collect: `KOGNITOS_TOKEN`, `KOGNITOS_ORG_ID`, `KOGNITOS_WORKSPACE_ID`, `KOGNITOS_BASE_URL` (must end with `/api/v1`)
+2. Create `.env` with these values
+3. Create `lib/kognitos.ts` with `req()`, `invokeAutomation()`, `pollRun()` helpers
+4. Create `lib/quill.ts` with `createQuillThread()`, `askQuill()` helpers
+5. Verify: `GET /organizations/{ORG}/workspaces/{WS}/automations?pageSize=50` → confirm 200
+6. List connections: `GET /organizations/{ORG}/workspaces/{WS}/connections` → confirm needed integrations
+7. **Gate**: Connection successful, all needed integrations available
+
+## Phase 2: Create Automation via Quill
+1. Create blank automation: `POST .../automations` with `{ "display_name": "..." }`
+2. Create Quill thread for the automation
+3. Send detailed SOP description to Quill — describe inputs, processing logic, outputs
+4. Quill generates the automation code
+5. Store `AUTOMATION_ID` in `.env`
+6. **Gate**: Automation created, Quill confirms code is valid
+
+## Phase 3: Build Test Harness
+1. Create `scripts/test-accuracy.ts` that:
+   - Uploads test files via Kognitos files API
+   - Invokes automation with `mode=test` + file input
+   - Polls for completion
+   - Decodes Arrow IPC output table
+   - Validates against business rules (Epicor, reference data)
+   - Reports accuracy metrics
+2. **Gate**: Test harness runs and produces a baseline report
+
+## Phase 4: Iterate on Accuracy
+1. Run test files through the automation
+2. Analyze error patterns (which fields are wrong, why)
+3. Send targeted Quill fixes for the top issues
+4. Re-run tests, compare before/after
+5. Repeat until accuracy plateaus
+6. **Key principle**: Fix via Quill, test, fix, test — don't batch too many changes
+
+## Phase 5: Production Workflow
+1. Add SharePoint integration (fetch input files, upload output, archive)
+2. Add email notification (HTML formatted, with Excel attachment)
+3. Add error handling (no files → email, extraction fails → email)
+4. Archive source files as the LAST step (not before email/upload)
+5. Test production mode end-to-end
+6. **Gate**: Full SharePoint → extract → validate → Excel → email → archive works
+
+## Phase 6: Publish
+1. Final test with production data
+2. Publish the draft
+3. Set up email trigger in Kognitos UI (if applicable)
+4. Monitor first few production runs
+
+## Universal Rules
+- **All automation logic runs inside Kognitos** — no local scripts in the production path
+- **Local TypeScript is for development/testing only** — Quill interactions, test harness, accuracy analysis
+- **Never hardcode secrets in automation code** — use environment variables or Kognitos connections
+- **Always send an email notification** — even on errors, never fail silently
+- **Archive source files LAST** — so failed runs don't lose the input
+- **Test after every Quill change** — SPy errors are hard to debug after multiple changes
+- **Use mode input** for dual-mode: `mode=test` (direct file, skip SharePoint/email) vs `mode=production` (full workflow)

@@ -1,0 +1,20 @@
+{
+  "name": "kognitos-automation-template",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Template for building Kognitos automations with Cursor + Quill",
+  "scripts": {
+    "verify": "npx tsx scripts/verify-connection.ts",
+    "quill": "npx tsx scripts/continue-quill.ts"
+  },
+  "dependencies": {
+    "apache-arrow": "^21.1.0",
+    "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

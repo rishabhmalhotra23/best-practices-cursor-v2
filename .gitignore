@@ -1,0 +1,11 @@
+.env
+.env.local
+node_modules/
+dist/
+.cache/
+output/
+test-results/
+*.js
+*.d.ts
+*.js.map
+.DS_Store
