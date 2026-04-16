@@ -1,5 +1,5 @@
 ---
-description: Proven patterns for building Kognitos automations — from IDP extraction to Epicor validation to SharePoint/email output
+description: Proven patterns for building Kognitos automations — integration usage, output handling, error handling, production readiness
 alwaysApply: true
 ---
 
@@ -7,170 +7,114 @@ alwaysApply: true
 
 Lessons learned from building production automations on Kognitos.
 
-## Document Extraction (IDP)
+## Integration Procedure Discovery
 
-### extract_table_from_thing
-- Best for: structured tables in scanned documents
-- Returns a table with columns you describe in the `description` parameter
-- **Page-level header values** (like employee ID, name) can be repeated for every row — describe them as "same value for every row on the page, from the page header"
-- **CRITICAL**: Include "Extract EVERY single row — do NOT summarize, combine, or skip any rows" in the description
-- Adding too many columns can reduce row count — test after each change
-
-### extract_data_from_thing
-- Best for: field-level extraction (key-value pairs)
-- Slower and can timeout on large documents (600s IDP timeout)
-- For large docs (40+ pages), use extract_table_from_thing instead
-
-### IDP Gotchas
-- Scanned handwritten documents are inherently noisy — expect OCR errors on digits
-- Dashes can be misread as dots and vice versa in numbers (e.g., "1-05" instead of "1.05")
-- Always sanitize extracted values: `hours.replace('-', '.').replace(' ', '')`
-- Suffixes can be hallucinated (IDP adds "-AA" that isn't in the handwriting)
-- Names are more reliable than numbers for identification
-
-## Epicor BAQ Integration
-
-### Calling BAQs (read-only)
-Two-step invoke_method pattern:
+Before using ANY integration procedure, always ask Quill to search for it first:
 ```
-Step 1: GetByID
-result = kognitos.epicor.epicor.invoke_method(
-    service_name="Ice.BO.DynamicQuerySvc",
-    method_name="GetByID",
-    parameters={"queryID": "BAQ_NAME"}
-)
-
-Step 2: Execute
-exec_result = kognitos.epicor.epicor.invoke_method(
-    service_name="Ice.BO.DynamicQuerySvc",
-    method_name="Execute",
-    parameters={
-        "executionParams": {"QueryExecutionParameter": []},
-        "queryDS": result["returnObj"]
-    }
-)
-rows = exec_result["returnObj"]["Results"]
+"Search for all available procedures in the [connection_name] connection (connection_id: [id]).
+Show me the exact signature for [procedure_name]."
 ```
+Never guess argument names or types — Quill has access to the procedure catalog.
 
-### Validation Strategy: Name-First
-For handwritten documents where IDs are unreliable:
+## Calling Integration Procedures in SPy
 
-1. **Name matching** (primary): Extract the person's name from the document, fuzzy-match against BAQ names
-   - Normalize: uppercase, strip extra spaces
-   - Compare last names (last word)
-   - If unique match → auto-correct ID
-   - If multiple matches → use division/department as tiebreaker
-
-2. **ID matching** (secondary): Digit-by-digit comparison
-   - Only if name matching fails
-   - Find valid IDs within 1-2 digit difference
-   - Auto-correct only if exactly one candidate
-
-3. **Division matching** (tiebreaker): Compare extracted area/department against BAQ division
-   - Normalize to uppercase
-   - Substring match (BAQ "JWC" matches document "JWC Upholstery")
-
-### Job Number Validation
-Multi-strategy approach:
-1. Direct lookup in Epicor
-2. Normalize spaces to dashes ("84909 AK" → "84909-AK")
-3. Strip suffix and check base number ("85365-AA" → "85365")
-4. Add common suffixes to base number ("85365" → try "85365-AA", "85365-AB", etc.)
-5. Dynamic suffix scan (if "89623-AD" not found, check all "89623-*" in Epicor)
-6. If all fail → mark as unknown
-
-## Confidence Scoring
-
-Three levels, based on validation results:
-
-| Level | Criteria | User Action |
-|-------|----------|-------------|
-| **High** | Employee + Job both match Epicor, hours present | No review needed |
-| **Medium** | Employee auto-corrected by name/ID, OR job auto-resolved by suffix | Quick verify — check AutomationComments |
-| **Low** | Employee unknown, OR job unknown, OR hours missing | Manual review required |
-
-## SharePoint Integration
-
-### Folder Navigation
+All integration calls follow the pattern:
 ```
-doc_lib = kognitos.sharepoint.sharepoint.retrieve_document_library_by_url(
-    url='https://tenant.sharepoint.com/sites/SiteName/Shared%20Documents'
-)
-root = kognitos.sharepoint.sharepoint.retrieve_root(document_library=doc_lib)
-items = kognitos.sharepoint.sharepoint.retrieve_folder_items(folder=root)
+result = kognitos.<connection_alias>.<book_name>.<procedure_name>(arg1=val1, arg2=val2)
 ```
-- `retrieve_folder_at_a_path` often fails with site name resolution — use URL-based navigation instead
+- The connection alias and book name come from the automation's `connections` map
+- All required arguments must be provided — SPy has no default arguments
+- Some procedures return a file, some return a dict, some return nothing — check the signature
+
+## Common Integration Patterns
+
+### Document Extraction (IDP)
+- `extract_table_from_thing(thing=file, description="...", format="table")` — for structured tables
+- `extract_data_from_thing(thing=file, ...)` — for field-level key-value extraction
+- Tables are better for structured data; field extraction is better for metadata
+- Large documents (40+ pages) can timeout — prefer table extraction over per-page field extraction
+- Describe columns explicitly in the description — the IDP uses it as a guide
+- Page-level values (like a header ID) can be repeated for every row if described that way
+
+### ERP / Database Validation
+- Fetch reference data (employees, products, accounts) from your ERP via its integration
+- Build lookup dicts in SPy for O(1) validation: `lookup[id] = name`
+- Validate extracted data against reference — don't trust OCR blindly
+- **Names are stronger identifiers than numbers** for handwritten documents
+- Auto-correct when confident (single match), flag when ambiguous (multiple matches)
+
+### File Storage (SharePoint, Google Drive, etc.)
+- Use URL-based folder navigation (`retrieve_document_library_by_url`) — path-based often fails on site name resolution
 - Always check if folders exist before creating them (`conflict_behavior="rename"`)
-
-### File Operations
-- `download_file(file=item)` → returns file content
-- `upload_file(folder=dest, file=content, file_name="name.xlsx", conflict_behavior="replace")`
+- `download_file(file=item)` → file content; `upload_file(folder=dest, file=content, file_name="name")`
 - `move_item_to_folder(item=file, folder=dest)` — for archiving
-- `create_folder_in_another_folder(another_folder=parent, folder_name="name")`
 
-## Excel Output (excel_standalone)
+### Excel File Creation (excel_standalone)
+- `create_excel(file_name="...", worksheet_names=["Sheet1"])` → file object
+- `insert_table(excel=file, worksheet_name="...", table={"data": table}, start_cell="A1")` → new file
+- `format_cells(excel=file, worksheet_name="...", cell_range="A1:Z1", bg_color="4472C4", ...)` → new file
+- **format_cells returns a NEW file every time** — always reassign: `file = ...format_cells(...)`
+- Batch formatting calls (one range) is faster and more reliable than per-cell calls
 
-### Creating Excel
-```
-excel_file = kognitos.excel_standalone.excel_standalone.create_excel(
-    file_name="output.xlsx", worksheet_names=["Sheet1"]
-)
-excel_file = kognitos.excel_standalone.excel_standalone.insert_table(
-    excel=excel_file, worksheet_name="Sheet1", table={"data": my_table}, start_cell="A1"
-)
-```
-
-### Color Coding
-```
-excel_file = kognitos.excel_standalone.excel_standalone.format_cells(
-    excel=excel_file, worksheet_name="Sheet1", 
-    cell_range="A1:V1",  # header row
-    bg_color="4472C4", font_color="FFFFFF", font_weight="bold", font_size=None
-)
-```
-- Colors: Green `E2EFDA`, Yellow `FFF2CC`, Pink `FCE4EC`, Blue header `4472C4`
-- **format_cells returns a NEW file** — always reassign: `excel_file = ...format_cells(...)`
-- Batch formatting (one call for a range) is faster than per-cell calls
-- Limit format calls to avoid transient HTTP errors
-
-## Email (Outlook)
-
-```
-kognitos.outlook.outlook.send_email(
-    email={"subject": "...", "body": "..."},  # body can be HTML
-    recipient="email@example.com",
-    cc_recipients=None, bcc_recipients=None,
-    attachments=None,
-    named_attachments=[{"file": excel_file, "filename": "output.xlsx"}],
-    user=None
-)
-```
-- Use `named_attachments` (not `attachments`) to control the filename
-- Recipient must be a plain email address — strip display names: `"Name <email>" → "email"`
-- The email dict only supports `subject` and `body` — no `bodyContentType` field
+### Email (Outlook / Gmail)
+- Use `named_attachments=[{"file": f, "filename": "name.xlsx"}]` to control attachment filename
+- Use `attachments` only when the internal filename is acceptable
+- Recipient must be a plain email address — strip display names (`"Name <email>"` → `"email"`)
+- The email dict only supports `subject` and `body` fields — no `bodyContentType`
 - HTML in body is auto-detected by Outlook
+
+## Output Table Best Practices
+
+### Column Order
+SPy dicts do NOT preserve insertion order. To enforce column order:
+```
+table = table.select_columns(["Col1", "Col2", "Col3", ...])
+```
+Always call `select_columns` before `set_output` or `insert_table`.
+
+### Confidence Scoring Pattern
+Add a confidence column to help users triage:
+- **High**: All key fields validated against reference data
+- **Medium**: Auto-corrected fields (user should verify the correction)
+- **Low**: Unresolved fields requiring manual review
+- Color-code rows in Excel: green = High, yellow = Medium, pink = Low
+
+### Comments Column Pattern
+Add an automation comments column that explains what was done:
+- What was auto-corrected and why (e.g., "Employee corrected: 9463 (was 3463, confirmed by name)")
+- What was flagged and why (e.g., "Unknown job number")
+- Keep it concise — no filenames or verbose preamble in every row
 
 ## Production Workflow Pattern
 
-Recommended order of operations for a robust automation:
+Recommended order of operations:
 
-1. **Read inputs** (mode, notification email, etc.)
-2. **Fetch source files** (SharePoint or direct input)
-3. **If no files → send notification email, exit cleanly** (don't crash)
-4. **Fetch reference data** (Epicor BAQs)
-5. **Extract data** (IDP)
-6. **Validate and correct** (name-first, then ID, then job matching)
-7. **Build output table** (with select_columns for correct order)
-8. **Create Excel** (with color coding)
-9. **Upload Excel** to SharePoint Output folder
-10. **Send summary email** with Excel attachment
-11. **Archive source files** to SharePoint Archive folder ← **LAST step** (so failed runs don't lose the input)
+1. **Read inputs / configuration**
+2. **Fetch source files** (from file storage or direct input)
+3. **Handle empty input** — send notification, exit cleanly (don't crash)
+4. **Fetch reference data** (from ERP / databases)
+5. **Extract data** (from documents)
+6. **Validate and correct** against reference data
+7. **Build output** (with enforced column order)
+8. **Create output file** (Excel with formatting)
+9. **Upload output** to file storage
+10. **Send notification** (email with attachment)
+11. **Archive source files** ← **LAST step** (so failed runs don't lose the input)
+
+## Dual-Mode Pattern
+
+Support both testing and production in the same automation:
+- Add a `mode` input: `mode = read_input("mode", type=str)`
+- `mode == "test"`: Accept direct file input, skip file storage operations, skip email
+- `mode == "production"`: Full workflow with file storage, email, archiving
+- This avoids maintaining two separate automations
 
 ## Error Handling in SPy
 
 Since there's no `try/except`:
 - Check `if len(list) == 0` before accessing `list[0]`
-- Use `.get(key, default)` for dict lookups (if available) or `if key in dict` guards
-- Sanitize all string-to-number conversions before calling `float()` or `int()`
-- For missing inputs: hardcode defaults rather than using `read_input` with optional types (SPy throws on missing inputs)
-- Send error notification emails instead of crashing silently
+- Use `if key in dict` before `dict[key]` — `.get()` may not be available
+- Sanitize strings before `float()` or `int()` — replace dashes with dots, check for empty
+- For missing inputs: hardcode defaults rather than using `read_input` with optional types
+- Send error notification emails instead of crashing — the user should always hear back
+- Wrap risky sections in `if` guards, not assertions
